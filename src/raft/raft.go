@@ -23,8 +23,6 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
-
-
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -36,6 +34,22 @@ type ApplyMsg struct {
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
+
+type LogEntry struct {
+	Command     interface{}    //each entry contains command for state machine
+	Term        int            //when entry was received by leader
+}
+
+//states of servers
+const (
+	Follower = 0
+	Candidate = 1
+	Leader = 2
+)
+
+//
+
+
 
 //
 // A Go object implementing a single Raft peer.
@@ -50,6 +64,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	//persistent state on all servers
+	CurrentTerm   int
+	VotedFor      int
+	Log[]         LogEntry
+	//volatile state on all servers
+	commitIndex   int
+	lastApplied   int
+	//volatile state on leaders
+	nextIndex     []int
+	matchIndex    []int
+
+	state         int    //state of servers, Follower = 0, Candidate = 1, Leader = 2
+	applyCh       chan ApplyMsg
+
 }
 
 // return currentTerm and whether this server
@@ -59,6 +87,17 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+	//在一个goroutine获得mutex后，其他goroutine只能等到这个goroutine释放该mutex，保证数据一致性。
+	
+	rf.mu.Lock()
+	term = rf.CurrentTerm
+	if rf.state == Leader{
+		isleader = true
+	}else{
+		isleader = false
+	}
+	rf.mu.Unlock()
+
 	return term, isleader
 }
 
@@ -90,14 +129,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.yyy)
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	Term           int    //candidate's term
+	CandidateId    int    //candidate's requesting vote
+	LastLogIndex   int    //index of candidate's last log entry
+	LastLogTerm    int    //term of candidate's last log entry
 }
 
 //
@@ -105,6 +145,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+	Term           int    //currentTerm, for candidate to update itself
+	VoteGranted    int    //true means candidate received vote
 }
 
 //
@@ -188,6 +230,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.CurrentTerm = 0
+	rf.VotedFor = -1
+	rf.Log = make([]LogEntry, 0)
+	rf.Log = append(rf.Log, LogEntry{Term: 0})
+
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	size := len(rf.peers)
+	rf.nextIndex = make([]int, size)
+	rf.matchIndex = make([]int, size)
+
+	rf.state = Follower
+	rf.applyCh = applyCh
+	
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
