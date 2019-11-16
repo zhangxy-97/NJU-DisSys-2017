@@ -119,8 +119,6 @@ type Raft struct {
 }
 
 func (rf *Raft) restartTime() {
-
-
 	randst := ElectionMinTime+rand.Int63n(ElectionMaxTime-ElectionMinTime)
 	timeout := time.Millisecond * time.Duration(randst)
 	if rf.state == "LEADER" {
@@ -132,16 +130,16 @@ func (rf *Raft) restartTime() {
 		go func() {
 			for {
 				<-rf.timer.C
-
 				rf.Timeout()
 			}
+
 		}()
 	}
 	rf.timer.Reset(timeout)
 }
 
-func (rf *Raft) GetState() (int, bool) {
 
+func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isLeader bool
 	// Your code here.
@@ -151,10 +149,8 @@ func (rf *Raft) GetState() (int, bool) {
 	}else{
 		isLeader = false
 	}
-
 	return term, isLeader
 }
-
 
 
 type RequestVoteArgs struct {
@@ -180,7 +176,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	can_vote := true     //restriction of Safety 5.4, using the index and term of the last entries in the logs.
+	can_vote := true      
 
 	if len(rf.logs)>0{
         //rf is voter, args is candidate
@@ -267,8 +263,6 @@ func (rf *Raft) countVote(reply RequestVoteReply) {
 		return
 	}
 }
-
-
 
 //
 // example AppendEntry RPC arguments structure.
