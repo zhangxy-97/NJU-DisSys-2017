@@ -59,8 +59,8 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	
 }
+
 
 //
 // restore previously persisted state.
@@ -83,6 +83,7 @@ type LogEntry struct {
 type AppendEntryReply struct {
 	Term        int        //currentTerm, for leader to update itself
 	Success     bool       //true if follower cantained entry matching prevLogIndex and prevLogTerm
+	CommitIndex int
 }
 
 
@@ -221,6 +222,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 		return
 	}
+
 }
 
 
@@ -262,37 +264,89 @@ func (rf *Raft) countVote(reply RequestVoteReply) {
 		}
 		return
 	}
+
 }
 
 //
 // example AppendEntry RPC arguments structure.
 //
 type AppendEntryArgs struct {
-	Term         int
-	Leader_id    int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []LogEntry
-	LeaderCommit int
+	Term         int            //leader's term
+	Leader_id    int            //so follower can redirect clients
+	PrevLogIndex int            //index of log entry immediately preceding new ones
+	PrevLogTerm  int            //term of prevLogIndex entry
+	Entries      []LogEntry     //log entries to store
+	LeaderCommit int            //leader's commitIndex
 }
 
 
 //
-// append entries
+// receiver implementation
 //
 func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
+		//Reply false, if term < currentTerm
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	} else {
 		rf.state = "FOLLOWER"
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		reply.Term = args.Term
+
+		//add EX02
+		if args.PrevLogIndex >= 0 && 
+		(len(rf.logs)-1 < args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm){
+			//if an existing entry conflicts with a new one (missing entries || same index but different terms)
+			index := len(rf.logs)-1
+			for index >= 0{
+				if(args.PrevLogTerm == rf.logs[index].Term){
+					break
+				}
+				index--
+			}
+			reply.CommitIndex = index //获取二者达成一致的log index
+			reply.Success = false
+		}else if args.Entries != nil{
+			//append new entries not already in the log 
+			rf.logs = rf.logs[:args.PrevLogIndex + 1]
+			rf.logs = append(rf.logs, args.Entries...)
+			if len(rf.logs)-1 >= args.LeaderCommit {
+				rf.commitIndex = args.LeaderCommit
+				go rf.commit()
+			}
+			reply.CommitIndex = len(rf.logs) - 1
+			reply.Success = true
+		}else{
+			if len(rf.logs)-1 >= args.LeaderCommit {
+				rf.commitIndex = args.LeaderCommit
+				go rf.commit()
+			}
+			reply.CommitIndex = args.PrevLogIndex  //没提交新的logs 所以仍返回原index
+			reply.Success = true
+		}
+
 	}
 	rf.restartTime()
+}
+
+//将lastApplied+1到commitIndex之间的command提交到rf.applyCh用于通道传输
+func (rf* Raft) commit(){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	i := rf.lastApplied + 1
+	for i <= rf.commitIndex{
+		var args ApplyMsg
+		args.Index = i+1
+		args.Command = rf.logs[i].Command
+		rf.applyCh <- args
+		i++
+	}
+	rf.lastApplied = rf.commitIndex
 }
 
 //
@@ -307,6 +361,17 @@ func (rf *Raft) SendAppendEntries() {
 
 		//AppendEntryArgs is empty  -->  used as heartbeat
 		var args AppendEntryArgs
+		//add Ex02
+		args.Term = rf.currentTerm
+		args.Leader_id = rf.me
+		args.PrevLogIndex = rf.nextIndex[i] - 1   //发送给第i个server 的下一个entry的index-1
+		if args.PrevLogIndex >= 0{
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term    //前一个LogEntry中的Term
+		}
+		if rf.nextIndex[i] < len(rf.logs){
+			args.Entries = rf.logs[rf.nextIndex[i]:]
+		}
+		args.LeaderCommit = rf.commitIndex
 		
 		go func(server int, args AppendEntryArgs) {
 			var reply AppendEntryReply
@@ -330,13 +395,41 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 	}
 
 	// "LEADER" should degenerate to Follower
-	if reply.Term > rf.currentTerm {
+	if reply.Term > rf.currentTerm { 
 		rf.currentTerm = reply.Term
 		rf.state = "FOLLOWER"
 		rf.votedFor = -1
 		rf.restartTime()
 		return
 	}
+
+	//If successful: update nextIndex and matchindex for follower
+	if reply.Success{
+		rf.nextIndex[server] = reply.CommitIndex + 1
+		rf.matchIndex[server] = reply.CommitIndex
+		count :=1
+		i :=0
+		for i < len(rf.peers){
+			if i!=rf.me && rf.matchIndex[i] >= rf.matchIndex[server]{
+				count += 1
+			}
+			i++	
+		}
+		
+		//只有leader当前任期的entry才可以通过计数来判断是否提交
+		if count >= len(rf.peers)/2+1{
+			if rf.commitIndex < rf.matchIndex[server] &&
+			 rf.logs[rf.matchIndex[server]].Term == rf.currentTerm {
+				rf.commitIndex = rf.matchIndex[server]
+				go rf.commit()
+			}
+		}
+	}else{
+		//If AppendEntries fails because of log inconsistency, decrement nextIndex and retry
+		rf.nextIndex[server] = reply.CommitIndex + 1
+		rf.SendAppendEntries()
+	}
+
 
 }
 
@@ -353,10 +446,29 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 // term. the third return value is true if this server believes it is
 // the "LEADER".
 //
+
+//add EX02  --> 开始一个过程：将client下一条command添加进Raft的log并达成一致。
+//需要实现：如果不是leader则返回，初始化LogEntry将必要信息添加进去，并为返回值赋值。
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
 	isLeader := false
+
+	if rf.state != "LEADER"{
+		return index, term, isLeader
+	}
+
+	var newLog LogEntry
+	newLog.Command = command
+	newLog.Term = rf.currentTerm
+	rf.logs = append(rf.logs, newLog)
+
+	index = len(rf.logs)
+	term = rf.currentTerm
+	isLeader = true
 
 	return index, term, isLeader
 }
@@ -450,7 +562,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	
 	rf.restartTime()
 
 	return rf
