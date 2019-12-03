@@ -23,8 +23,8 @@ import "sync"
 import "labrpc"
 import "math/rand"
 import "time"
-// import "bytes"
-// import "encoding/gob"
+import "bytes"
+import "encoding/gob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -53,12 +53,13 @@ const (
 func (rf *Raft) persist() {
 	// Your code here.
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 
@@ -68,10 +69,13 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here.
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	if data != nil{
+		r := bytes.NewBuffer(data)
+	    d := gob.NewDecoder(r)
+	    d.Decode(&rf.currentTerm)
+		d.Decode(&rf.votedFor)
+		d.Decode(&rf.logs)
+	}
 
 }
 
@@ -198,6 +202,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term == rf.currentTerm {
 		if rf.votedFor == -1 && can_vote{
 			rf.votedFor = args.CandidateId
+			rf.persist()
 		}
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = (rf.votedFor == args.CandidateId)
@@ -213,6 +218,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 		if(can_vote){
 			rf.votedFor = args.CandidateId
+			rf.persist()
 		}
 
 		rf.restartTime()
@@ -318,6 +324,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 				rf.commitIndex = args.LeaderCommit
 				go rf.commit()
 			}
+			rf.persist()
 			reply.CommitIndex = len(rf.logs) - 1
 			reply.Success = true
 		}else{
@@ -465,6 +472,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newLog.Command = command
 	newLog.Term = rf.currentTerm
 	rf.logs = append(rf.logs, newLog)
+	rf.persist()
 
 	index = len(rf.logs)
 	term = rf.currentTerm
@@ -496,6 +504,7 @@ func (rf *Raft) Timeout() {
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
 		rf.votesCount = 1
+		rf.persist()
 
 		var args RequestVoteArgs
 		args.Term = rf.currentTerm
@@ -562,6 +571,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.persist()
 	rf.restartTime()
 
 	return rf
